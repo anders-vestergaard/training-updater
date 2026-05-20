@@ -1,4 +1,4 @@
-import os, logging, schedule, time
+import os, logging, schedule, time, threading
 from datetime import date, timedelta
 import requests
 
@@ -322,10 +322,20 @@ def send_error(err):
         timeout=15,
     )
 
+# ── Manuel trigger flag ────────────────────────────────────────────────────────
+
+_manual_triggered = False
+_run_lock = threading.Lock()
+
+def reset_flag():
+    global _manual_triggered
+    _manual_triggered = False
+    logging.info("Manuel trigger-flag nulstillet (02:00)")
+
 # ── Main ───────────────────────────────────────────────────────────────────────
 
-def run():
-    logging.info("Starter daglig check-in...")
+def run(source="scheduled"):
+    logging.info("Starter check-in (kilde: %s)...", source)
     try:
         data_block = build_data_block()
         logging.info("Data hentet, spørger Claude (%s)...", MODEL)
@@ -336,13 +346,59 @@ def run():
         send_error(str(e))
         raise
 
+def scheduled_run():
+    if _manual_triggered:
+        logging.info("Manuel kørsel allerede gennemført i dag — springer 09:00 over")
+        return
+    run(source="scheduled")
+
+def manual_run():
+    global _manual_triggered
+    with _run_lock:
+        if _manual_triggered:
+            logging.info("Manuel trigger modtaget, men er allerede kørt i dag")
+            return
+        _manual_triggered = True
+    run(source="manuel")
+
+# ── Telegram polling ───────────────────────────────────────────────────────────
+
+def poll_telegram():
+    token  = os.environ["TELEGRAM_BOT_TOKEN"]
+    chat_id = os.environ["TELEGRAM_CHAT_ID"]
+    offset = 0
+    url    = f"{TG_BASE}{token}/getUpdates"
+
+    logging.info("Telegram polling startet")
+    while True:
+        try:
+            r = requests.get(url, params={"timeout": 30, "offset": offset}, timeout=35)
+            if not r.ok:
+                time.sleep(5)
+                continue
+            for update in r.json().get("result", []):
+                offset = update["update_id"] + 1
+                msg = update.get("message", {})
+                # Acceptér kun beskeder fra den konfigurerede chat
+                if str(msg.get("chat", {}).get("id")) != chat_id:
+                    continue
+                text = msg.get("text", "").strip().lower()
+                if text in ("/nu", "/run", "nu", "run"):
+                    logging.info("Manuel trigger modtaget via Telegram")
+                    threading.Thread(target=manual_run, daemon=True).start()
+        except Exception as e:
+            logging.warning("Telegram polling fejl: %s", e)
+            time.sleep(10)
+
 if __name__ == "__main__":
     if os.environ.get("TEST") == "1":
         logging.info("TEST-kørsel")
-        run()
+        run(source="test")
     else:
         logging.info("Scheduler startet — kl. 09:00 Europe/Copenhagen")
-        schedule.every().day.at("09:00").do(run)
+        threading.Thread(target=poll_telegram, daemon=True).start()
+        schedule.every().day.at("09:00").do(scheduled_run)
+        schedule.every().day.at("02:00").do(reset_flag)
         while True:
             schedule.run_pending()
             time.sleep(30)
