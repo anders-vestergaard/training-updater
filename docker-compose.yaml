@@ -1,0 +1,12 @@
+services:
+  training-updater:
+    build: .
+    container_name: training-updater
+    restart: unless-stopped
+    env_file:
+      - stack.env
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "3"
