@@ -4,9 +4,8 @@ import requests
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(message)s)
+    format="%(asctime)s %(levelname)s %(message)s")
 
-# ── Config ─────────────────────────────────────────────────────────────────────
 ATHLETE_ID    = os.environ["INTERVALS_ATHLETE_ID"]
 API_KEY       = os.environ["INTERVALS_API_KEY"]
 ANTHROPIC_KEY = os.environ["ANTHROPIC_API_KEY"]
@@ -16,8 +15,6 @@ BASE = "https://intervals.icu/api/v1"
 AUTH = ("API_KEY", API_KEY)
 
 LAT, LON = 57.4641, 9.9774  # Hjørring
-
-# ── Intervals.icu ──────────────────────────────────────────────────────────────
 
 def iget(path, params=None):
     r = requests.get(f"{BASE}{path}", params=params, auth=AUTH, timeout=15)
