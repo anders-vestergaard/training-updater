@@ -201,11 +201,12 @@ def build_data_block():
     yesterday = today - timedelta(days=1)
     tomorrow  = today + timedelta(days=1)
 
-    wellness   = fetch_wellness(days=5)
-    acts_today = fetch_activities(today.isoformat(),     today.isoformat())
-    acts_yest  = fetch_activities(yesterday.isoformat(), yesterday.isoformat())
-    planned_tm = fetch_planned(tomorrow.isoformat(),     tomorrow.isoformat())
-    weather    = fetch_weather()
+    wellness    = fetch_wellness(days=5)
+    acts_today  = fetch_activities(today.isoformat(),     today.isoformat())
+    acts_yest   = fetch_activities(yesterday.isoformat(), yesterday.isoformat())
+    planned_td  = fetch_planned(today.isoformat(),        today.isoformat())
+    planned_tm  = fetch_planned(tomorrow.isoformat(),     tomorrow.isoformat())
+    weather     = fetch_weather()
 
     s = [f"DATO: {today.strftime('%A %d. %B %Y')} (dansk tid)", ""]
 
@@ -224,8 +225,12 @@ def build_data_block():
     if acts_today:
         for a in acts_today:
             s += [fmt_activity(a), ""]
+    elif planned_td:
+        s += ["Ingen aktivitet registreret endnu — planlagt session:", ""]
+        for e in planned_td:
+            s += [fmt_event(e), ""]
     else:
-        s += ["Ingen aktivitet registreret endnu", ""]
+        s += ["Ingen aktivitet registreret endnu og ingen planlagt session", ""]
 
     s += [f"═══ PLANLAGT I MORGEN ({tomorrow.isoformat()}) ═══"]
     if planned_tm:
@@ -276,7 +281,7 @@ def ask_claude(data_block):
 
 TG_BASE = "https://api.telegram.org/bot"
 
-def tg_send(text, parse_mode="Markdown"):
+def tg_send(text, parse_mode="HTML"):
     """Send én besked — maks 4096 tegn. Splitter automatisk ved behov."""
     token   = os.environ["TELEGRAM_BOT_TOKEN"]
     chat_id = os.environ["TELEGRAM_CHAT_ID"]
@@ -304,7 +309,7 @@ def tg_send(text, parse_mode="Markdown"):
 
 def send(message):
     today = date.today().strftime("%d/%m")
-    full  = f"🏃 *Træning {today}*\n\n{message}"
+    full  = f"🏃 <b>Træning {today}</b>\n\n{message}"
     tg_send(full)
     logging.info("Sendt til Telegram (%d tegn)", len(full))
 
