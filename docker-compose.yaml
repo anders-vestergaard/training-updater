@@ -1,12 +1,18 @@
 services:
   training-updater:
-    build: .
+    # image: 'ghcr.io/anders-vestergaard/training-updater:main' # Uncomment on Portainer
+    build: . # Remove on Portainer
     container_name: training-updater
     restart: unless-stopped
     env_file:
-      - stack.env
+      - .env # stack.env on Portainer
+    volumes:
+      - portainer-share:/config
     logging:
       driver: "json-file"
       options:
         max-size: "5m"
         max-file: "3"
+volumes:
+  portainer-share:
+    external: true

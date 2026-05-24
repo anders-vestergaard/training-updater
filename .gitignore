@@ -1,4 +1,4 @@
-stack.env
+.env
 system_prompt.txt
 __pycache__/
 *.pyc
