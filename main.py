@@ -1,4 +1,4 @@
-import os, logging, schedule, time, threading
+import os, logging, schedule, time, threading, uuid
 from datetime import date, timedelta
 import requests
 
@@ -281,14 +281,16 @@ def ask_claude(data_block):
 
 TG_BASE = "https://api.telegram.org/bot"
 
-def tg_send(text, parse_mode="HTML"):
+def tg_send(text, parse_mode="HTML", run_id=None):
     """Send én besked — maks 4096 tegn. Splitter automatisk ved behov."""
     token   = os.environ["TELEGRAM_BOT_TOKEN"]
     chat_id = os.environ["TELEGRAM_CHAT_ID"]
     limit   = 4000  # lidt under 4096 for sikkerhed
 
     chunks = [text[i:i+limit] for i in range(0, len(text), limit)]
-    for chunk in chunks:
+    logging.info("[%s] Sender %d chunk(s) til Telegram", run_id, len(chunks))
+    for i, chunk in enumerate(chunks):
+        logging.info("[%s] POST chunk %d/%d (%d tegn)", run_id, i+1, len(chunks), len(chunk))
         r = requests.post(
             f"{TG_BASE}{token}/sendMessage",
             json={
@@ -298,8 +300,9 @@ def tg_send(text, parse_mode="HTML"):
             },
             timeout=15,
         )
+        logging.info("[%s] Telegram svar: %s", run_id, r.status_code)
         if not r.ok:
-            # Hvis Markdown parser fejler, send som plain text
+            logging.warning("[%s] HTML parse fejl, prøver plain text", run_id)
             r2 = requests.post(
                 f"{TG_BASE}{token}/sendMessage",
                 json={"chat_id": chat_id, "text": chunk},
@@ -307,11 +310,11 @@ def tg_send(text, parse_mode="HTML"):
             )
             r2.raise_for_status()
 
-def send(message):
+def send(message, run_id=None):
     today = date.today().strftime("%d/%m")
     full  = f"🏃 <b>Træning {today}</b>\n\n{message}"
-    tg_send(full)
-    logging.info("Sendt til Telegram (%d tegn)", len(full))
+    tg_send(full, run_id=run_id)
+    logging.info("[%s] Sendt til Telegram (%d tegn)", run_id, len(full))
 
 def send_error(err):
     token   = os.environ["TELEGRAM_BOT_TOKEN"]
@@ -322,43 +325,66 @@ def send_error(err):
         timeout=15,
     )
 
-# ── Manuel trigger flag ────────────────────────────────────────────────────────
+# ── Daglig kørsel-flag (fil-baseret, overlever genstart) ──────────────────────
 
-_manual_triggered = False
+_FLAG_PATH = os.path.join(
+    os.environ.get("SYSTEM_PROMPT_PATH", "system_prompt.txt")
+    .replace("system_prompt.txt", ""),
+    ".ran_today"
+)
 _run_lock = threading.Lock()
 
+def _flag_is_set():
+    try:
+        return open(_FLAG_PATH).read().strip() == date.today().isoformat()
+    except Exception:
+        return False
+
+def _set_flag():
+    try:
+        with open(_FLAG_PATH, "w") as f:
+            f.write(date.today().isoformat())
+    except Exception as e:
+        logging.warning("Kunne ikke skrive flag-fil: %s", e)
+
 def reset_flag():
-    global _manual_triggered
-    _manual_triggered = False
-    logging.info("Manuel trigger-flag nulstillet (02:00)")
+    try:
+        open(_FLAG_PATH, "w").close()
+    except Exception:
+        pass
+    logging.info("Daglig flag nulstillet (02:00)")
 
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 def run(source="scheduled"):
-    logging.info("Starter check-in (kilde: %s)...", source)
+    run_id = uuid.uuid4().hex[:8]
+    logging.info("[%s] Starter check-in (kilde: %s, tråd: %s)...", run_id, source, threading.current_thread().name)
     try:
         data_block = build_data_block()
-        logging.info("Data hentet, spørger Claude (%s)...", MODEL)
+        logging.info("[%s] Data hentet, spørger Claude (%s)...", run_id, MODEL)
         message = ask_claude(data_block)
-        send(message)
+        send(message, run_id=run_id)
     except Exception as e:
-        logging.error("Fejl: %s", e, exc_info=True)
+        logging.error("[%s] Fejl: %s", run_id, e, exc_info=True)
         send_error(str(e))
         raise
 
 def scheduled_run():
-    if _manual_triggered:
-        logging.info("Manuel kørsel allerede gennemført i dag — springer 09:00 over")
+    if _flag_is_set():
+        logging.info("Allerede kørt i dag — springer 09:00 over")
         return
+    with _run_lock:
+        if _flag_is_set():
+            return
+        _set_flag()
     run(source="scheduled")
 
 def manual_run():
-    global _manual_triggered
     with _run_lock:
-        if _manual_triggered:
+        if _flag_is_set():
             logging.info("Manuel trigger modtaget, men er allerede kørt i dag")
             return
-        _manual_triggered = True
+        _set_flag()
     run(source="manuel")
 
 # ── Telegram polling ───────────────────────────────────────────────────────────
@@ -369,21 +395,26 @@ def poll_telegram():
     offset = 0
     url    = f"{TG_BASE}{token}/getUpdates"
 
-    logging.info("Telegram polling startet")
+    logging.info("Telegram polling startet (offset=%d)", offset)
     while True:
         try:
             r = requests.get(url, params={"timeout": 30, "offset": offset}, timeout=35)
             if not r.ok:
                 time.sleep(5)
                 continue
-            for update in r.json().get("result", []):
+            updates = r.json().get("result", [])
+            if updates:
+                logging.info("Polling: %d ny(e) update(s) modtaget", len(updates))
+            for update in updates:
                 offset = update["update_id"] + 1
                 msg = update.get("message", {})
-                # Acceptér kun beskeder fra den konfigurerede chat
-                if str(msg.get("chat", {}).get("id")) != chat_id:
+                from_chat = str(msg.get("chat", {}).get("id"))
+                text = msg.get("text", "").strip()
+                logging.info("Polling update: chat=%s tekst=%r offset=%d", from_chat, text, offset)
+                if from_chat != chat_id:
+                    logging.info("Ignorerer besked fra ukendt chat %s", from_chat)
                     continue
-                text = msg.get("text", "").strip().lower()
-                if text in ("/nu", "/run", "nu", "run"):
+                if text.lower() in ("/nu", "/run", "nu", "run"):
                     logging.info("Manuel trigger modtaget via Telegram")
                     threading.Thread(target=manual_run, daemon=True).start()
         except Exception as e:
@@ -396,6 +427,7 @@ if __name__ == "__main__":
         run(source="test")
     else:
         logging.info("Scheduler startet — kl. 09:00 Europe/Copenhagen")
+        logging.info("Flag-fil: %s (sat i dag: %s)", _FLAG_PATH, _flag_is_set())
         threading.Thread(target=poll_telegram, daemon=True).start()
         schedule.every().day.at("09:00").do(scheduled_run)
         schedule.every().day.at("02:00").do(reset_flag)
