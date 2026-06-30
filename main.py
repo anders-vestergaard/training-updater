@@ -36,6 +36,13 @@ def fetch_planned(oldest_date, newest_date):
                 {"oldest": oldest_date, "newest": newest_date,
                  "category": "WORKOUT"})
 
+def fetch_intervals(activity_id):
+    try:
+        return iget(f"/athlete/{ATHLETE_ID}/activities/{activity_id}/intervals")
+    except Exception as e:
+        logging.warning("Kunne ikke hente intervals for %s: %s", activity_id, e)
+        return []
+
 # ── Vejr (Open-Meteo, ingen API-nøgle) ────────────────────────────────────────
 
 def fetch_weather():
@@ -152,6 +159,40 @@ def fmt_activity(a):
 
     return "\n".join(lines)
 
+def fmt_intervals(intervals):
+    MIN_DURATION = 30  # sekunder — ignorer mikropauser
+
+    work = [iv for iv in intervals
+            if iv.get("type") != "RECOVERY" and (iv.get("moving_time") or iv.get("elapsed_time") or 0) >= MIN_DURATION]
+
+    if len(work) < 3:
+        return None  # ustruktureret session — ikke relevant at vise
+
+    lines = ["Segmenter:"]
+    for i, iv in enumerate(work, 1):
+        dur  = iv.get("moving_time") or iv.get("elapsed_time") or 0
+        dist = iv.get("distance") or 0
+        hr   = iv.get("average_heartrate")
+        spd  = iv.get("average_speed")    # m/s
+        cad  = iv.get("average_cadence")
+        iff  = iv.get("intensity")
+
+        parts = [f"#{i} {dur//60}:{dur%60:02d} min"]
+        if dist:
+            parts.append(f"{dist/1000:.2f} km")
+        if spd and spd > 0:
+            pace_sec = 1000 / spd
+            parts.append(f"pace {int(pace_sec)//60}:{int(pace_sec)%60:02d}/km")
+        if hr:
+            parts.append(f"HR {hr:.0f} bpm")
+        if cad:
+            parts.append(f"kadence {cad*2:.0f} spm")
+        if iff:
+            parts.append(f"IF {iff:.0f}%")
+        lines.append("  " + " | ".join(parts))
+
+    return "\n".join(lines)
+
 def fmt_wellness_series(w_list):
     if not w_list:
         return "Ingen wellness-data"
@@ -217,7 +258,14 @@ def build_data_block():
     s += [f"═══ GÅRSDAGENS AKTIVITET ({yesterday.isoformat()}) ═══"]
     if acts_yest:
         for a in acts_yest:
-            s += [fmt_activity(a), ""]
+            s += [fmt_activity(a)]
+            act_id = a.get("id")
+            if act_id:
+                ivs = fetch_intervals(act_id)
+                iv_str = fmt_intervals(ivs)
+                if iv_str:
+                    s += [iv_str]
+            s += [""]
     else:
         s += ["Ingen aktivitet registreret", ""]
 
