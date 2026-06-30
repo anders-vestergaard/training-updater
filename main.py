@@ -511,8 +511,12 @@ def _calc_nutrition(wellness, activities, planned, state):
         "difference":                difference,
     }
 
-def build_nutrition_block():
-    today         = date.today()
+def _last_monday():
+    today = date.today()
+    return today - timedelta(days=today.weekday())
+
+def build_nutrition_block(ref_date=None):
+    today         = ref_date or date.today()
     week_start    = (today - timedelta(days=7)).isoformat()
     next_week_end = (today + timedelta(days=6)).isoformat()
 
@@ -636,14 +640,14 @@ def ask_claude_nutrition(data_block):
 
     return response_text
 
-def run_nutrition():
+def run_nutrition(ref_date=None):
     run_id = uuid.uuid4().hex[:8]
-    logging.info("[%s] Starter ernæringsopdatering (mandag)...", run_id)
+    logging.info("[%s] Starter ernæringsopdatering (ref: %s)...", run_id, ref_date or "i dag")
     try:
         wellness   = fetch_wellness(days=8)
         avg_weight = _average_weight(wellness)
 
-        data_block = build_nutrition_block()
+        data_block = build_nutrition_block(ref_date=ref_date)
         logging.info("[%s] Data hentet, spørger Claude om ernæring...", run_id)
         message = ask_claude_nutrition(data_block)
 
@@ -737,6 +741,9 @@ def poll_telegram():
                 if text.lower() in ("/nu", "/run", "nu", "run"):
                     logging.info("Manuel trigger modtaget via Telegram")
                     threading.Thread(target=manual_run, daemon=True).start()
+                elif text.lower() in ("/mad", "mad"):
+                    logging.info("Manuel ernæringstrigger modtaget via Telegram")
+                    threading.Thread(target=run_nutrition, kwargs={"ref_date": _last_monday()}, daemon=True).start()
         except Exception as e:
             logging.warning("Telegram polling fejl: %s", e)
             time.sleep(10)
