@@ -1,5 +1,7 @@
 .env
 system_prompt.txt
+nutrition_prompt.txt
+nutrition_prompt.example.txt
 __pycache__/
 *.pyc
 .venv/
