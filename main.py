@@ -1,4 +1,4 @@
-import os, logging, schedule, time, threading, uuid
+import os, json, logging, schedule, time, threading, uuid, re
 from datetime import date, timedelta
 import requests
 
@@ -325,14 +325,12 @@ def send_error(err):
         timeout=15,
     )
 
-# ── Daglig kørsel-flag (fil-baseret, overlever genstart) ──────────────────────
+# ── Stier (afledt af SYSTEM_PROMPT_PATH) ─────────────────────────────────────
 
-_FLAG_PATH = os.path.join(
-    os.environ.get("SYSTEM_PROMPT_PATH", "system_prompt.txt")
-    .replace("system_prompt.txt", ""),
-    ".ran_today"
-)
-_run_lock = threading.Lock()
+_CONFIG_DIR           = os.path.dirname(os.environ.get("SYSTEM_PROMPT_PATH", "system_prompt.txt"))
+_FLAG_PATH            = os.path.join(_CONFIG_DIR, ".ran_today")
+_NUTRITION_STATE_PATH = os.path.join(_CONFIG_DIR, "nutrition_state.json")
+_run_lock             = threading.Lock()
 
 def _flag_is_set():
     try:
@@ -353,6 +351,153 @@ def reset_flag():
     except Exception:
         pass
     logging.info("Daglig flag nulstillet (02:00)")
+
+# ── Ernæring ──────────────────────────────────────────────────────────────────
+
+def load_nutrition_state():
+    try:
+        with open(_NUTRITION_STATE_PATH, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+def save_nutrition_state(state):
+    try:
+        with open(_NUTRITION_STATE_PATH, "w", encoding="utf-8") as f:
+            json.dump(state, f, ensure_ascii=False, indent=2)
+        logging.info("Nutrition state gemt: %s", state)
+    except Exception as e:
+        logging.warning("Kunne ikke gemme nutrition_state: %s", e)
+
+def load_nutrition_prompt():
+    path = os.environ.get(
+        "NUTRITION_PROMPT_PATH",
+        os.path.join(_CONFIG_DIR, "nutrition_prompt.txt")
+    )
+    try:
+        with open(path, encoding="utf-8") as f:
+            return f.read().strip()
+    except FileNotFoundError:
+        raise RuntimeError(f"nutrition_prompt.txt ikke fundet på '{path}'.")
+
+def fmt_wellness_with_weight(w_list):
+    if not w_list:
+        return "Ingen wellness-data"
+    lines = []
+    for w in w_list:
+        parts = [w.get("id", "?")]
+        for key, label in [
+            ("ctl", "CTL"), ("atl", "ATL"), ("tsb", "TSB"),
+            ("hrv", "HRV"), ("restingHR", "RHR"),
+        ]:
+            v = w.get(key)
+            if v is not None:
+                parts.append(f"{label} {v:.1f}" if isinstance(v, float) else f"{label} {v}")
+        weight = w.get("weight")
+        if weight:
+            parts.append(f"Vægt {weight:.1f} kg")
+        slp = w.get("sleepSecs")
+        if slp:
+            parts.append(f"Søvn {slp/3600:.1f}t")
+        lines.append("  " + " | ".join(parts))
+    return "\n".join(lines)
+
+def summarize_zone_time(activities):
+    totals = [0, 0, 0, 0, 0]
+    for a in activities:
+        zones = a.get("icu_hr_in_zones") or a.get("hr_zones") or []
+        for i, z in enumerate(zones[:5]):
+            totals[i] += z
+    names = ["Z1", "Z2", "Z3", "Z4", "Z5"]
+    lines = [f"{names[i]}: {z//60} min" for i, z in enumerate(totals) if z > 0]
+    return "\n".join(lines) if lines else "Ingen zonetid registreret"
+
+def build_nutrition_block():
+    today      = date.today()
+    week_start = (today - timedelta(days=7)).isoformat()
+
+    wellness   = fetch_wellness(days=8)
+    activities = fetch_activities(week_start, today.isoformat())
+    state      = load_nutrition_state()
+
+    s = [f"DATO: {today.strftime('%A %d. %B %Y')} (dansk tid) — UGE {today.isocalendar()[1]}", ""]
+
+    s += ["═══ WELLNESS OG VÆGT (seneste 8 dage) ═══",
+          fmt_wellness_with_weight(wellness), ""]
+
+    s += ["═══ UGENTLIG ZONETID (løb) ═══",
+          summarize_zone_time(activities), ""]
+
+    s += ["═══ AKTIVITETER DENNE UGE ═══"]
+    if activities:
+        for a in activities:
+            s += [fmt_activity(a), ""]
+    else:
+        s += ["Ingen aktiviteter registreret", ""]
+
+    s += ["═══ FORRIGE UGES MÅL ═══"]
+    if state:
+        s += [
+            f"Uge startende: {state.get('week_start', '?')}",
+            f"Kaloriemål: {state.get('calories', '?')} kcal/dag",
+            f"Protein: {state.get('protein_g', '?')} g/dag",
+            f"Kulhydrat: {state.get('carbs_g', '?')} g/dag",
+            f"Fedt: {state.get('fat_g', '?')} g/dag",
+            f"Startvægt uge: {state.get('weight_at_start', '?')} kg",
+            "",
+        ]
+    else:
+        s += ["Ingen tidligere mål — første kørsel.", ""]
+
+    return "\n".join(s)
+
+def ask_claude_nutrition(data_block):
+    system = load_nutrition_prompt()
+    r = requests.post(
+        "https://api.anthropic.com/v1/messages",
+        headers={
+            "x-api-key": ANTHROPIC_KEY,
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+        },
+        json={
+            "model": MODEL,
+            "max_tokens": 2500,
+            "system": system,
+            "messages": [{"role": "user", "content": data_block}],
+        },
+        timeout=60,
+    )
+    r.raise_for_status()
+    response_text = r.json()["content"][0]["text"]
+
+    # Claude instrueres til at afslutte med en ```json { ... } ``` blok
+    match = re.search(r'```json\s*(\{.*?\})\s*```', response_text, re.DOTALL)
+    if match:
+        try:
+            new_state = json.loads(match.group(1))
+            new_state["week_start"] = today_iso = date.today().isoformat()
+            save_nutrition_state(new_state)
+            response_text = response_text[:match.start()].strip()
+        except Exception as e:
+            logging.warning("Kunne ikke parse nutrition state fra Claude: %s", e)
+
+    return response_text
+
+def run_nutrition():
+    run_id = uuid.uuid4().hex[:8]
+    logging.info("[%s] Starter ernæringsopdatering (mandag)...", run_id)
+    try:
+        data_block = build_nutrition_block()
+        logging.info("[%s] Data hentet, spørger Claude om ernæring...", run_id)
+        message = ask_claude_nutrition(data_block)
+        week_no = date.today().isocalendar()[1]
+        full = f"🥗 <b>Ernæring — uge {week_no}</b>\n\n{message}"
+        tg_send(full, run_id=run_id)
+        logging.info("[%s] Ernæringsrapport sendt (%d tegn)", run_id, len(full))
+    except Exception as e:
+        logging.error("[%s] Fejl i ernæringskørsel: %s", run_id, e, exc_info=True)
+        send_error(f"Ernæring fejlede: {e}")
 
 # ── Main ───────────────────────────────────────────────────────────────────────
 
@@ -430,6 +575,7 @@ if __name__ == "__main__":
         logging.info("Flag-fil: %s (sat i dag: %s)", _FLAG_PATH, _flag_is_set())
         threading.Thread(target=poll_telegram, daemon=True).start()
         schedule.every().day.at("09:00").do(scheduled_run)
+        schedule.every().monday.at("09:10").do(run_nutrition)
         schedule.every().day.at("02:00").do(reset_flag)
         while True:
             schedule.run_pending()
