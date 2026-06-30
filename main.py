@@ -291,22 +291,21 @@ def build_data_block():
 
 # ── System prompt ──────────────────────────────────────────────────────────────
 
-def load_system_prompt():
-    """Læser system_prompt.txt ved hver kørsel — redigér filen uden rebuild."""
-    path = os.environ.get("SYSTEM_PROMPT_PATH", "system_prompt.txt")
+def load_training_prompt():
+    path = os.environ.get("TRAINING_PROMPT_PATH", "training_prompt.txt")
     try:
         with open(path, encoding="utf-8") as f:
             return f.read().strip()
     except FileNotFoundError:
         raise RuntimeError(
-            f"system_prompt.txt ikke fundet på '{path}'. "
+            f"training_prompt.txt ikke fundet på '{path}'. "
             "Sørg for at filen er mountet korrekt i containeren."
         )
 
 # ── Anthropic ──────────────────────────────────────────────────────────────────
 
 def ask_claude(data_block):
-    system = load_system_prompt()
+    system = load_training_prompt()
     r = requests.post(
         "https://api.anthropic.com/v1/messages",
         headers={
@@ -375,7 +374,7 @@ def send_error(err):
 
 # ── Stier (afledt af SYSTEM_PROMPT_PATH) ─────────────────────────────────────
 
-_CONFIG_DIR           = os.path.dirname(os.environ.get("SYSTEM_PROMPT_PATH", "system_prompt.txt"))
+_CONFIG_DIR           = os.path.dirname(os.environ.get("TRAINING_PROMPT_PATH", "training_prompt.txt"))
 _FLAG_PATH            = os.path.join(_CONFIG_DIR, ".ran_today")
 _NUTRITION_STATE_PATH = os.path.join(_CONFIG_DIR, "nutrition_state.json")
 _run_lock             = threading.Lock()

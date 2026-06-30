@@ -1,5 +1,5 @@
 .env
-system_prompt.txt
+training_prompt.txt
 nutrition_prompt.txt
 nutrition_prompt.example.txt
 __pycache__/
