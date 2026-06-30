@@ -322,7 +322,8 @@ def ask_claude(data_block):
         timeout=60,
     )
     r.raise_for_status()
-    return r.json()["content"][0]["text"]
+    text = r.json()["content"][0]["text"]
+    return re.sub(r'<thinking>.*?</thinking>', '', text, flags=re.DOTALL).strip()
 
 # ── Telegram ───────────────────────────────────────────────────────────────────
 
@@ -626,6 +627,9 @@ def ask_claude_nutrition(data_block):
     )
     r.raise_for_status()
     response_text = r.json()["content"][0]["text"]
+
+    # Fjern eventuelle <thinking>...</thinking> blokke
+    response_text = re.sub(r'<thinking>.*?</thinking>', '', response_text, flags=re.DOTALL).strip()
 
     # Claude instrueres til at afslutte med en ```json { ... } ``` blok
     match = re.search(r'```json\s*(\{.*?\})\s*```', response_text, re.DOTALL)
