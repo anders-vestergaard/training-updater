@@ -459,6 +459,17 @@ def summarize_zone_time(activities):
     lines = [f"{names[i]}: {z//60} min" for i, z in enumerate(totals) if z > 0]
     return "\n".join(lines) if lines else "Ingen zonetid registreret"
 
+def _athlete_age():
+    dob_str = os.environ.get("ATHLETE_BIRTHDATE", "")
+    if not dob_str:
+        return None
+    try:
+        dob = date.fromisoformat(dob_str)
+        today = date.today()
+        return today.year - dob.year - ((today.month, today.day) < (dob.month, dob.day))
+    except ValueError:
+        return None
+
 def build_nutrition_block():
     today      = date.today()
     week_start = (today - timedelta(days=7)).isoformat()
@@ -468,6 +479,10 @@ def build_nutrition_block():
     state      = load_nutrition_state()
 
     s = [f"DATO: {today.strftime('%A %d. %B %Y')} (dansk tid) — UGE {today.isocalendar()[1]}", ""]
+
+    age = _athlete_age()
+    if age:
+        s += [f"ALDER: {age} år", ""]
 
     s += ["═══ WELLNESS OG VÆGT (seneste 8 dage) ═══",
           fmt_wellness_with_weight(wellness), ""]
