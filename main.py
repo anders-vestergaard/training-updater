@@ -460,12 +460,11 @@ def _athlete_age():
     except ValueError:
         return None
 
-def _latest_weight(wellness):
-    for w in reversed(wellness):
-        wt = w.get("weight")
-        if wt:
-            return wt
-    return None
+def _average_weight(wellness):
+    weights = [w["weight"] for w in wellness if w.get("weight")]
+    if len(weights) >= 4:
+        return sum(weights) / len(weights)
+    return weights[-1] if weights else None
 
 def _calc_nutrition(wellness, activities, planned):
     total_kcal = sum(a.get("calories", 0) or 0 for a in activities)
@@ -475,7 +474,7 @@ def _calc_nutrition(wellness, activities, planned):
     planned_min = sum(((e.get("moving_time") or e.get("duration") or 0) / 60) for e in planned)
     training_kcal_week = kcal_per_min * planned_min
 
-    weight  = _latest_weight(wellness)
+    weight  = _average_weight(wellness)
     height  = float(os.environ.get("ATHLETE_HEIGHT_CM", 0) or 0)
     age     = _athlete_age() or 0
     deficit = float(os.environ.get("ATHLETE_DEFICIT_KCAL", 750) or 750)
@@ -519,7 +518,9 @@ def build_nutrition_block():
 
     s += ["═══ BEREGNINGER ═══"]
     if calc["weight"]:
-        s += [f"Aktuel vægt: {calc['weight']:.1f} kg"]
+        weights = [w["weight"] for w in wellness if w.get("weight")]
+        label = f"7-dages gennemsnit ({len(weights)} vejninger)" if len(weights) >= 4 else "Seneste vejning (fallback)"
+        s += [f"Vægt ({label}): {calc['weight']:.1f} kg"]
     if calc["bmr"]:
         s += [f"BMR: {calc['bmr']:.0f} kcal/dag"]
     if calc["tdee"]:
