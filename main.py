@@ -494,6 +494,24 @@ def _calc_nutrition(wellness, activities, planned, state):
     calorie_adjustment = float(state.get("calorie_adjustment", 0)) if state else 0
     adjusted_target    = (target_kcal + calorie_adjustment) if target_kcal else None
 
+    # Makroberegning
+    macros = {}
+    if adjusted_target and weight:
+        protein_g  = int(weight * 2.1)
+        protein_kcal = protein_g * 4
+        fat_g      = int(adjusted_target * 0.32 / 9)
+        fat_kcal   = fat_g * 9
+        carbs_kcal = adjusted_target - protein_kcal - fat_kcal
+        carbs_g    = int(carbs_kcal / 4)
+        # Justér kulhydrat opad hvis total er mere end 3 kcal under mål
+        while (protein_kcal + fat_kcal + carbs_g * 4) < adjusted_target - 3:
+            carbs_g += 1
+        macros = {
+            "protein_g": protein_g,
+            "fat_g":     fat_g,
+            "carbs_g":   carbs_g,
+        }
+
     return {
         "weight":                    weight,
         "kcal_per_min":              kcal_per_min,
@@ -510,6 +528,7 @@ def _calc_nutrition(wellness, activities, planned, state):
         "expected_loss":             expected_loss,
         "actual_loss":               actual_loss,
         "difference":                difference,
+        **macros,
     }
 
 def _last_monday():
@@ -552,6 +571,8 @@ def build_nutrition_block(ref_date=None):
         s += [f"Trend-justering: {calc['calorie_adjustment']:+.0f} kcal/dag"]
     if calc["adjusted_target"]:
         s += [f"Kaloriemål (anvendt): {calc['adjusted_target']:.0f} kcal/dag"]
+    if calc.get("protein_g"):
+        s += [f"Makroer: Protein {calc['protein_g']} g | Fedt {calc['fat_g']} g | Kulhydrat {calc['carbs_g']} g"]
     s += [""]
 
     s += ["═══ SENESTE UGES TRÆNING ═══"]
@@ -655,10 +676,17 @@ def run_nutrition(ref_date=None):
         logging.info("[%s] Data hentet, spørger Claude om ernæring...", run_id)
         message = ask_claude_nutrition(data_block)
 
-        # Gem gennemsnitsvægt og historik i state til næste uges sammenligning
+        # Gem gennemsnitsvægt, makroer og historik i state
         if avg_weight:
             state = load_nutrition_state()
             state["avg_weight"] = round(avg_weight, 2)
+            w_state = fetch_wellness(days=8)
+            c = _calc_nutrition(w_state, [], [], state)
+            if c.get("protein_g"):
+                state["protein_g"] = c["protein_g"]
+                state["fat_g"]     = c["fat_g"]
+                state["carbs_g"]   = c["carbs_g"]
+                state["calories"]  = round(c["adjusted_target"]) if c["adjusted_target"] else None
 
             # Tilføj ugens resultat til historik
             calc = _calc_nutrition(wellness, [], [], state)
