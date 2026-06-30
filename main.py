@@ -466,7 +466,7 @@ def _average_weight(wellness):
         return sum(weights) / len(weights)
     return weights[-1] if weights else None
 
-def _calc_nutrition(wellness, activities, planned):
+def _calc_nutrition(wellness, activities, planned, state):
     total_kcal = sum(a.get("calories", 0) or 0 for a in activities)
     total_min  = sum((a.get("moving_time", 0) or 0) / 60 for a in activities)
     kcal_per_min = total_kcal / total_min if total_min > 0 else 0
@@ -483,6 +483,12 @@ def _calc_nutrition(wellness, activities, planned):
     tdee = (bmr * 1.2 + training_kcal_week / 7) if bmr else None
     target_kcal = (tdee - deficit) if tdee else None
 
+    # Vægttab feedback-loop
+    expected_loss = (deficit * 7) / 7700  # kg
+    prev_avg_weight = state.get("avg_weight") if state else None
+    actual_loss = (prev_avg_weight - weight) if (prev_avg_weight and weight) else None
+    difference  = (actual_loss - expected_loss) if actual_loss is not None else None
+
     return {
         "weight":                    weight,
         "kcal_per_min":              kcal_per_min,
@@ -494,6 +500,9 @@ def _calc_nutrition(wellness, activities, planned):
         "tdee":                      tdee,
         "deficit":                   deficit,
         "target_kcal":               target_kcal,
+        "expected_loss":             expected_loss,
+        "actual_loss":               actual_loss,
+        "difference":                difference,
     }
 
 def build_nutrition_block():
@@ -505,7 +514,7 @@ def build_nutrition_block():
     activities = fetch_activities(week_start, today.isoformat())
     planned  = fetch_planned(today.isoformat(), next_week_end)
     state    = load_nutrition_state()
-    calc     = _calc_nutrition(wellness, activities, planned)
+    calc     = _calc_nutrition(wellness, activities, planned, state)
 
     s = [f"DATO: {today.strftime('%A %d. %B %Y')} (dansk tid) — UGE {today.isocalendar()[1]}", ""]
 
@@ -554,7 +563,7 @@ def build_nutrition_block():
         "",
     ]
 
-    s += ["═══ FORRIGE UGES MÅL ═══"]
+    s += ["═══ FORRIGE UGES MÅL OG RESULTAT ═══"]
     if state:
         s += [
             f"Uge startende: {state.get('week_start', '?')}",
@@ -562,9 +571,16 @@ def build_nutrition_block():
             f"Protein: {state.get('protein_g', '?')} g",
             f"Kulhydrat: {state.get('carbs_g', '?')} g",
             f"Fedt: {state.get('fat_g', '?')} g",
-            f"Startvægt: {state.get('weight_at_start', '?')} kg",
-            "",
+            f"Gennemsnitsvægt forrige uge: {state.get('avg_weight', '?')} kg",
         ]
+        if calc["actual_loss"] is not None:
+            s += [
+                f"Forventet vægttab: {calc['expected_loss']:.2f} kg",
+                f"Faktisk vægttab: {calc['actual_loss']:.2f} kg",
+                f"Difference: {calc['difference']:+.2f} kg "
+                f"({'inden for støjgrænse' if abs(calc['difference']) < 0.5 else 'justering anbefales'})",
+            ]
+        s += [""]
     else:
         s += ["Ingen tidligere mål — første kørsel.", ""]
 
@@ -607,9 +623,19 @@ def run_nutrition():
     run_id = uuid.uuid4().hex[:8]
     logging.info("[%s] Starter ernæringsopdatering (mandag)...", run_id)
     try:
+        wellness   = fetch_wellness(days=8)
+        avg_weight = _average_weight(wellness)
+
         data_block = build_nutrition_block()
         logging.info("[%s] Data hentet, spørger Claude om ernæring...", run_id)
         message = ask_claude_nutrition(data_block)
+
+        # Gem gennemsnitsvægt i state til næste uges sammenligning
+        if avg_weight:
+            state = load_nutrition_state()
+            state["avg_weight"] = round(avg_weight, 2)
+            save_nutrition_state(state)
+
         week_no = date.today().isocalendar()[1]
         full = f"🥗 <b>Ernæring — uge {week_no}</b>\n\n{message}"
         tg_send(full, run_id=run_id)
