@@ -489,6 +489,10 @@ def _calc_nutrition(wellness, activities, planned, state):
     actual_loss = (prev_avg_weight - weight) if (prev_avg_weight and weight) else None
     difference  = (actual_loss - expected_loss) if actual_loss is not None else None
 
+    # Trend-baseret justering
+    calorie_adjustment = float(state.get("calorie_adjustment", 0)) if state else 0
+    adjusted_target    = (target_kcal + calorie_adjustment) if target_kcal else None
+
     return {
         "weight":                    weight,
         "kcal_per_min":              kcal_per_min,
@@ -500,6 +504,8 @@ def _calc_nutrition(wellness, activities, planned, state):
         "tdee":                      tdee,
         "deficit":                   deficit,
         "target_kcal":               target_kcal,
+        "calorie_adjustment":        calorie_adjustment,
+        "adjusted_target":           adjusted_target,
         "expected_loss":             expected_loss,
         "actual_loss":               actual_loss,
         "difference":                difference,
@@ -528,7 +534,7 @@ def build_nutrition_block():
     s += ["═══ BEREGNINGER ═══"]
     if calc["weight"]:
         weights = [w["weight"] for w in wellness if w.get("weight")]
-        label = f"7-dages gennemsnit ({len(weights)} vejninger)" if len(weights) >= 4 else "Seneste vejning (fallback)"
+        label = f"glidende gennemsnit ({len(weights)} vejninger)" if len(weights) >= 4 else "seneste vejning (fallback)"
         s += [f"Vægt ({label}): {calc['weight']:.1f} kg"]
     if calc["bmr"]:
         s += [f"BMR: {calc['bmr']:.0f} kcal/dag"]
@@ -536,7 +542,11 @@ def build_nutrition_block():
         s += [f"TDEE: {calc['tdee']:.0f} kcal/dag"]
     s += [f"Mål underskud: {calc['deficit']:.0f} kcal/dag"]
     if calc["target_kcal"]:
-        s += [f"Kaloriemål: {calc['target_kcal']:.0f} kcal/dag"]
+        s += [f"Kaloriemål (base): {calc['target_kcal']:.0f} kcal/dag"]
+    if calc["calorie_adjustment"] != 0:
+        s += [f"Trend-justering: {calc['calorie_adjustment']:+.0f} kcal/dag"]
+    if calc["adjusted_target"]:
+        s += [f"Kaloriemål (anvendt): {calc['adjusted_target']:.0f} kcal/dag"]
     s += [""]
 
     s += ["═══ SENESTE UGES TRÆNING ═══"]
@@ -567,7 +577,7 @@ def build_nutrition_block():
     if state:
         s += [
             f"Uge startende: {state.get('week_start', '?')}",
-            f"Kaloriemål: {state.get('calories', '?')} kcal/dag",
+            f"Kaloriemål (anvendt): {state.get('calories', '?')} kcal/dag",
             f"Protein: {state.get('protein_g', '?')} g",
             f"Kulhydrat: {state.get('carbs_g', '?')} g",
             f"Fedt: {state.get('fat_g', '?')} g",
@@ -583,6 +593,13 @@ def build_nutrition_block():
         s += [""]
     else:
         s += ["Ingen tidligere mål — første kørsel.", ""]
+
+    history = state.get("history", []) if state else []
+    if history:
+        s += ["═══ HISTORIK (seneste 4 uger) ═══"]
+        for h in history[-4:]:
+            s += [f"  {h['week']}: forventet {h['expected']:.2f} kg, faktisk {h['actual']:.2f} kg, diff {h['diff']:+.2f} kg"]
+        s += [""]
 
     return "\n".join(s)
 
@@ -630,10 +647,23 @@ def run_nutrition():
         logging.info("[%s] Data hentet, spørger Claude om ernæring...", run_id)
         message = ask_claude_nutrition(data_block)
 
-        # Gem gennemsnitsvægt i state til næste uges sammenligning
+        # Gem gennemsnitsvægt og historik i state til næste uges sammenligning
         if avg_weight:
             state = load_nutrition_state()
             state["avg_weight"] = round(avg_weight, 2)
+
+            # Tilføj ugens resultat til historik
+            calc = _calc_nutrition(wellness, [], [], state)
+            if calc["actual_loss"] is not None:
+                history = state.get("history", [])
+                history.append({
+                    "week":     date.today().isoformat(),
+                    "expected": round(calc["expected_loss"], 2),
+                    "actual":   round(calc["actual_loss"], 2),
+                    "diff":     round(calc["difference"], 2),
+                })
+                state["history"] = history[-8:]  # behold maks 8 uger
+
             save_nutrition_state(state)
 
         week_no = date.today().isocalendar()[1]
