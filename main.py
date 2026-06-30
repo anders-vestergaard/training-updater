@@ -449,16 +449,6 @@ def fmt_wellness_with_weight(w_list):
         lines.append("  " + " | ".join(parts))
     return "\n".join(lines)
 
-def summarize_zone_time(activities):
-    totals = [0, 0, 0, 0, 0]
-    for a in activities:
-        zones = a.get("icu_hr_in_zones") or a.get("hr_zones") or []
-        for i, z in enumerate(zones[:5]):
-            totals[i] += z
-    names = ["Z1", "Z2", "Z3", "Z4", "Z5"]
-    lines = [f"{names[i]}: {z//60} min" for i, z in enumerate(totals) if z > 0]
-    return "\n".join(lines) if lines else "Ingen zonetid registreret"
-
 def _athlete_age():
     dob_str = os.environ.get("ATHLETE_BIRTHDATE", "")
     if not dob_str:
@@ -470,13 +460,53 @@ def _athlete_age():
     except ValueError:
         return None
 
-def build_nutrition_block():
-    today      = date.today()
-    week_start = (today - timedelta(days=7)).isoformat()
+def _latest_weight(wellness):
+    for w in reversed(wellness):
+        wt = w.get("weight")
+        if wt:
+            return wt
+    return None
 
-    wellness   = fetch_wellness(days=8)
+def _calc_nutrition(wellness, activities, planned):
+    total_kcal = sum(a.get("calories", 0) or 0 for a in activities)
+    total_min  = sum((a.get("moving_time", 0) or 0) / 60 for a in activities)
+    kcal_per_min = total_kcal / total_min if total_min > 0 else 0
+
+    planned_min = sum(((e.get("moving_time") or e.get("duration") or 0) / 60) for e in planned)
+    training_kcal_week = kcal_per_min * planned_min
+
+    weight  = _latest_weight(wellness)
+    height  = float(os.environ.get("ATHLETE_HEIGHT_CM", 0) or 0)
+    age     = _athlete_age() or 0
+    deficit = float(os.environ.get("ATHLETE_DEFICIT_KCAL", 750) or 750)
+
+    bmr  = (10 * weight + 6.25 * height - 5 * age + 5) if (weight and height and age) else None
+    tdee = (bmr * 1.2 + training_kcal_week / 7) if bmr else None
+    target_kcal = (tdee - deficit) if tdee else None
+
+    return {
+        "weight":                    weight,
+        "kcal_per_min":              kcal_per_min,
+        "total_min_last_week":       total_min,
+        "total_kcal_last_week":      total_kcal,
+        "planned_min_next_week":     planned_min,
+        "training_kcal_next_week":   training_kcal_week,
+        "bmr":                       bmr,
+        "tdee":                      tdee,
+        "deficit":                   deficit,
+        "target_kcal":               target_kcal,
+    }
+
+def build_nutrition_block():
+    today         = date.today()
+    week_start    = (today - timedelta(days=7)).isoformat()
+    next_week_end = (today + timedelta(days=6)).isoformat()
+
+    wellness = fetch_wellness(days=8)
     activities = fetch_activities(week_start, today.isoformat())
-    state      = load_nutrition_state()
+    planned  = fetch_planned(today.isoformat(), next_week_end)
+    state    = load_nutrition_state()
+    calc     = _calc_nutrition(wellness, activities, planned)
 
     s = [f"DATO: {today.strftime('%A %d. %B %Y')} (dansk tid) — UGE {today.isocalendar()[1]}", ""]
 
@@ -487,25 +517,51 @@ def build_nutrition_block():
     s += ["═══ WELLNESS OG VÆGT (seneste 8 dage) ═══",
           fmt_wellness_with_weight(wellness), ""]
 
-    s += ["═══ UGENTLIG ZONETID (løb) ═══",
-          summarize_zone_time(activities), ""]
+    s += ["═══ BEREGNINGER ═══"]
+    if calc["weight"]:
+        s += [f"Aktuel vægt: {calc['weight']:.1f} kg"]
+    if calc["bmr"]:
+        s += [f"BMR: {calc['bmr']:.0f} kcal/dag"]
+    if calc["tdee"]:
+        s += [f"TDEE: {calc['tdee']:.0f} kcal/dag"]
+    s += [f"Mål underskud: {calc['deficit']:.0f} kcal/dag"]
+    if calc["target_kcal"]:
+        s += [f"Kaloriemål: {calc['target_kcal']:.0f} kcal/dag"]
+    s += [""]
 
-    s += ["═══ AKTIVITETER DENNE UGE ═══"]
-    if activities:
-        for a in activities:
-            s += [fmt_activity(a), ""]
+    s += ["═══ SENESTE UGES TRÆNING ═══"]
+    s += [f"Aktiviteter: {len(activities)}"]
+    s += [f"Total tid: {calc['total_min_last_week']:.0f} min"]
+    s += [f"Total forbrænding: {calc['total_kcal_last_week']:.0f} kcal"]
+    if calc["kcal_per_min"]:
+        s += [f"Gennemsnit: {calc['kcal_per_min']:.1f} kcal/min"]
+    s += [""]
+    for a in activities:
+        s += [fmt_activity(a), ""]
+
+    s += ["═══ NÆSTE UGES PLAN ═══"]
+    if planned:
+        for e in planned:
+            dur = (e.get("moving_time") or e.get("duration") or 0) // 60
+            s += [f"  {e.get('name', 'Session')}: {dur} min"]
     else:
-        s += ["Ingen aktiviteter registreret", ""]
+        s += ["  Ingen planlagte sessions"]
+    s += [
+        f"Total planlagt: {calc['planned_min_next_week']:.0f} min",
+        f"Forventet forbrænding: {calc['training_kcal_next_week']:.0f} kcal"
+        f" ({calc['kcal_per_min']:.1f} kcal/min × {calc['planned_min_next_week']:.0f} min)",
+        "",
+    ]
 
     s += ["═══ FORRIGE UGES MÅL ═══"]
     if state:
         s += [
             f"Uge startende: {state.get('week_start', '?')}",
             f"Kaloriemål: {state.get('calories', '?')} kcal/dag",
-            f"Protein: {state.get('protein_g', '?')} g/dag",
-            f"Kulhydrat: {state.get('carbs_g', '?')} g/dag",
-            f"Fedt: {state.get('fat_g', '?')} g/dag",
-            f"Startvægt uge: {state.get('weight_at_start', '?')} kg",
+            f"Protein: {state.get('protein_g', '?')} g",
+            f"Kulhydrat: {state.get('carbs_g', '?')} g",
+            f"Fedt: {state.get('fat_g', '?')} g",
+            f"Startvægt: {state.get('weight_at_start', '?')} kg",
             "",
         ]
     else:
